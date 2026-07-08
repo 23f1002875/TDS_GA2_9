@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 import uuid
@@ -37,14 +38,18 @@ def check_rate_limit(client_id: str):
     bucket[:] = [t for t in bucket if now - t < WINDOW]
 
     if len(bucket) >= RATE_LIMIT:
-        retry = max(1, int(WINDOW - (now - bucket[0])) + 1)
-        raise HTTPException(
+        retry = max(1, int(bucket[0] + WINDOW - now))
+
+        return JSONResponse(
             status_code=429,
-            detail="Rate limit exceeded",
-            headers={"Retry-After": str(retry)},
+            content={"detail": "Rate limit exceeded"},
+            headers={
+                "Retry-After": str(retry)
+            },
         )
 
     bucket.append(now)
+    return None
 
 
 @app.post("/orders", status_code=201)
@@ -54,7 +59,9 @@ def create_order(
     client_id: str = Header("anonymous", alias="X-Client-Id"),
 ):
 
-    check_rate_limit(client_id)
+    limited = check_rate_limit(client_id)
+    if limited:
+        return limited
 
     if idempotency_key in idempotency_store:
         return idempotency_store[idempotency_key]
@@ -77,7 +84,12 @@ def list_orders(
     client_id: str = Header("anonymous", alias="X-Client-Id"),
 ):
 
-    check_rate_limit(client_id)
+    limited = check_rate_limit(client_id)
+    if limited:
+        return limited
+
+    if limit < 1:
+        limit = 1
 
     start = 1
 
@@ -85,7 +97,10 @@ def list_orders(
         try:
             start = int(base64.b64decode(cursor).decode())
         except Exception:
-            raise HTTPException(status_code=400, detail="Invalid cursor")
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "Invalid cursor"},
+            )
 
     end = min(start + limit - 1, TOTAL_ORDERS)
 
