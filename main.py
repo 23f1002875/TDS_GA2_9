@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -20,7 +20,6 @@ TOTAL_ORDERS = 51
 RATE_LIMIT = 17
 WINDOW = 10
 
-orders = []
 idempotency_store = {}
 rate_limits = {}
 
@@ -30,24 +29,32 @@ class OrderCreate(BaseModel):
     quantity: Optional[int] = 1
 
 
-@app.post("/orders", status_code=201)
-def create_order(
-    body: OrderCreate,
-    response: Response,
-    idempotency_key: str = Header(..., alias="Idempotency-Key"),
-    client_id: str = Header("anonymous", alias="X-Client-Id"),
-):
+def check_rate_limit(client_id: str):
     now = time.time()
 
     bucket = rate_limits.setdefault(client_id, [])
+
     bucket[:] = [t for t in bucket if now - t < WINDOW]
 
     if len(bucket) >= RATE_LIMIT:
-        retry = int(WINDOW - (now - bucket[0])) + 1
-        response.headers["Retry-After"] = str(retry)
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        retry = max(1, int(WINDOW - (now - bucket[0])) + 1)
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded",
+            headers={"Retry-After": str(retry)},
+        )
 
     bucket.append(now)
+
+
+@app.post("/orders", status_code=201)
+def create_order(
+    body: OrderCreate,
+    idempotency_key: str = Header(..., alias="Idempotency-Key"),
+    client_id: str = Header("anonymous", alias="X-Client-Id"),
+):
+
+    check_rate_limit(client_id)
 
     if idempotency_key in idempotency_store:
         return idempotency_store[idempotency_key]
@@ -59,7 +66,7 @@ def create_order(
     }
 
     idempotency_store[idempotency_key] = order
-    orders.append(order)
+
     return order
 
 
@@ -67,25 +74,18 @@ def create_order(
 def list_orders(
     limit: int = 10,
     cursor: Optional[str] = None,
-    response: Response = None,
     client_id: str = Header("anonymous", alias="X-Client-Id"),
 ):
-    now = time.time()
 
-    bucket = rate_limits.setdefault(client_id, [])
-    bucket[:] = [t for t in bucket if now - t < WINDOW]
-
-    if len(bucket) >= RATE_LIMIT:
-        retry = int(WINDOW - (now - bucket[0])) + 1
-        response.headers["Retry-After"] = str(retry)
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
-
-    bucket.append(now)
+    check_rate_limit(client_id)
 
     start = 1
 
     if cursor:
-        start = int(base64.b64decode(cursor).decode())
+        try:
+            start = int(base64.b64decode(cursor).decode())
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid cursor")
 
     end = min(start + limit - 1, TOTAL_ORDERS)
 
