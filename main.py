@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header
+from fastapi import FastAPI, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -30,38 +30,36 @@ class OrderCreate(BaseModel):
     quantity: Optional[int] = 1
 
 
-def check_rate_limit(client_id: str):
+@app.middleware("http")
+async def rate_limit(request: Request, call_next):
+    client_id = request.headers.get("X-Client-Id", "anonymous")
+
     now = time.time()
 
     bucket = rate_limits.setdefault(client_id, [])
-
     bucket[:] = [t for t in bucket if now - t < WINDOW]
 
     if len(bucket) >= RATE_LIMIT:
-        retry = max(1, int(bucket[0] + WINDOW - now))
+        retry_after = max(1, int(bucket[0] + WINDOW - now))
 
         return JSONResponse(
             status_code=429,
             content={"detail": "Rate limit exceeded"},
             headers={
-                "Retry-After": str(retry)
+                "Retry-After": str(retry_after)
             },
         )
 
     bucket.append(now)
-    return None
+
+    return await call_next(request)
 
 
 @app.post("/orders", status_code=201)
 def create_order(
     body: OrderCreate,
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
-    client_id: str = Header("anonymous", alias="X-Client-Id"),
 ):
-
-    limited = check_rate_limit(client_id)
-    if limited:
-        return limited
 
     if idempotency_key in idempotency_store:
         return idempotency_store[idempotency_key]
@@ -78,15 +76,7 @@ def create_order(
 
 
 @app.get("/orders")
-def list_orders(
-    limit: int = 10,
-    cursor: Optional[str] = None,
-    client_id: str = Header("anonymous", alias="X-Client-Id"),
-):
-
-    limited = check_rate_limit(client_id)
-    if limited:
-        return limited
+def list_orders(limit: int = 10, cursor: Optional[str] = None):
 
     if limit < 1:
         limit = 1
