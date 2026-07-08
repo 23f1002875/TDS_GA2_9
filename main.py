@@ -12,9 +12,10 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Retry-After"],
 )
 
 TOTAL_ORDERS = 51
@@ -45,14 +46,13 @@ async def rate_limit(request: Request, call_next):
         return JSONResponse(
             status_code=429,
             content={"detail": "Rate limit exceeded"},
-            headers={
-                "Retry-After": str(retry_after)
-            },
+            headers={"Retry-After": str(retry_after)},
         )
 
     bucket.append(now)
 
-    return await call_next(request)
+    response = await call_next(request)
+    return response
 
 
 @app.post("/orders", status_code=201)
@@ -60,7 +60,6 @@ def create_order(
     body: OrderCreate,
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
 ):
-
     if idempotency_key in idempotency_store:
         return idempotency_store[idempotency_key]
 
@@ -71,21 +70,18 @@ def create_order(
     }
 
     idempotency_store[idempotency_key] = order
-
     return order
 
 
 @app.get("/orders")
 def list_orders(limit: int = 10, cursor: Optional[str] = None):
-
-    if limit < 1:
-        limit = 1
+    limit = max(1, min(limit, TOTAL_ORDERS))
 
     start = 1
 
     if cursor:
         try:
-            start = int(base64.b64decode(cursor).decode())
+            start = int(base64.b64decode(cursor.encode()).decode())
         except Exception:
             return JSONResponse(
                 status_code=400,
